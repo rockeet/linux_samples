@@ -12,7 +12,14 @@
 size_t touch(char* base, off_t size) {
     size = (size + 4095) & ~4095;
     size_t sum = 0;
-    for (off_t i = 0; i < size; i += 4096) sum += base[i];
+    fflush(stdout);
+    fflush(stderr);
+    for (off_t i = 0; i < size; i += 4096) {
+        sum += base[i];
+        if (i / 4096 % 1024 == 0) {
+            write(STDOUT_FILENO, ".", 1);
+        }
+    }
     return sum;
 }
 
@@ -23,12 +30,14 @@ double ms(timespec t0, timespec t1) {
 void print_mincore(void* base, size_t len) {
     size_t num_pages = (len + 4096-1)/4096;
     unsigned char* is_incore = (unsigned char*)calloc(1, num_pages + 1); // set to zero
-    mincore(base, len, is_incore);
+    if (mincore(base, len, is_incore) < 0) {
+        fprintf(stderr, "ERROR: mincore(len=%zd) = %m\n", len);
+    }
     bool same = true;
     unsigned char first = is_incore[0];
     for (size_t i = 1; i < num_pages; ++i) if (is_incore[i] != first) { same = false; break; }
     if (same) {
-        printf("mincore = %c, all same\n", 0x30 + first);
+        printf("mincore = %c, all same(%zd pages)\n", 0x30 + first, num_pages);
     }
     else {
         for (size_t i = 0; i < num_pages; ++i) is_incore[i] += 0x30;
@@ -39,7 +48,7 @@ void print_mincore(void* base, size_t len) {
 
 void print_touch(char* base, off_t len) {
     print_mincore(base, len);
-    timespec t0, t1;
+    struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     size_t sum = touch(base, len);
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -47,9 +56,10 @@ void print_touch(char* base, off_t len) {
 }
 
 int main() {
+    struct timespec t0, t1;
     struct stat st;
     fstat(STDIN_FILENO, &st);
-    if (posix_fadvise(STDIN_FILENO, 0, st.st_size, POSIX_FADV_DONTNEED)) {
+    if (posix_fadvise(STDIN_FILENO, 0, st.st_size, POSIX_FADV_DONTNEED) != 0) {
         fprintf(stderr, "ERROR: posix_fadvise(STDIN, 0, %zd, DONTNEED) = %m\n", size_t(st.st_size));
         return 1;
     }
@@ -58,8 +68,18 @@ int main() {
         fprintf(stderr, "ERROR: mmap(STDIN, size=%zd) = %m\n", size_t(st.st_size));
         return 1;
     }
+  #if 1
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (madvise(base, st.st_size, MADV_WILLNEED) < 0) {
+        fprintf(stderr, "ERROR: madvise(STDIN, %zd, WILLNEED) = %m\n", size_t(st.st_size));
+        return 1;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    printf("madvise(WILLNEED) time = %f ms\n", ms(t0, t1));
+    //usleep(1000);
+  #endif
     print_touch(base, st.st_size);
-    if (posix_fadvise(STDIN_FILENO, 0, st.st_size, POSIX_FADV_DONTNEED)) {
+    if (posix_fadvise(STDIN_FILENO, 0, st.st_size, POSIX_FADV_DONTNEED) != 0) {
         fprintf(stderr, "ERROR: posix_fadvise(STDIN, 0, %zd, DONTNEED) = %m\n", size_t(st.st_size));
         return 1;
     }
@@ -69,7 +89,6 @@ int main() {
     }
     print_mincore(base, st.st_size);
     printf("--\n");
-    timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     if (madvise(base, st.st_size, MADV_WILLNEED) < 0) {
         fprintf(stderr, "ERROR: madvise(STDIN, %zd, WILLNEED) = %m\n", size_t(st.st_size));
